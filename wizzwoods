@@ -1,0 +1,105 @@
+import pyautogui
+import cv2
+import numpy as np
+import time
+import os
+import random  # 引入 random 模块用于随机延迟
+
+# 配置目标图片的文件夹路径
+IMAGE_FOLDER = r"C:\wizzwoods"  # 替换为你的图片文件夹路径
+
+# 每个元素需要点击的次数
+CLICKS_PER_ELEMENT = 5  # 你可以根据需要调整这个值
+
+# 图像匹配的信心度（0.0 ~ 1.0）
+CONFIDENCE = 0.6  # 根据需要调整
+
+def get_target_images(folder):
+    images = []
+    for file in os.listdir(folder):
+        if file.endswith('.png') or file.endswith('.jpg'):
+            images.append(os.path.join(folder, file))
+    return images
+
+def find_elements(screenshot_gray, templates):
+    rectangles = []
+
+    for template_path in templates:
+        template = cv2.imread(template_path, 0)
+
+        if template is None:
+            print(f"无法读取目标图片 {template_path}")
+            continue
+
+        # 使用多尺度模板匹配
+        scales = np.linspace(0.8, 1.2, 5)  # 根据需要调整尺度范围和步长
+
+        for scale in scales:
+            resized_template = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            w, h = resized_template.shape[::-1]
+
+            res = cv2.matchTemplate(screenshot_gray, resized_template, cv2.TM_CCOEFF_NORMED)
+            loc = np.where(res >= CONFIDENCE)
+            for pt in zip(*loc[::-1]):
+                rect = [int(pt[0]), int(pt[1]), int(w), int(h)]
+                rectangles.append(rect)
+                rectangles.append(rect)  # 为了 groupRectangles 函数，需要添加两次
+
+    if len(rectangles) > 0:
+        rectangles, weights = cv2.groupRectangles(rectangles, groupThreshold=1, eps=0.5)
+    else:
+        rectangles = []
+
+    return rectangles
+
+def click_element(x, y, width, height):
+    center_x = x + width // 2
+    center_y = y + height // 2
+
+    screen_width, screen_height = pyautogui.size()
+    # print(f"屏幕尺寸：width={screen_width}, height={screen_height}")
+    # print(f"点击坐标：({center_x}, {center_y})")
+
+    if 0 <= center_x <= screen_width and 0 <= center_y <= screen_height:
+        for i in range(CLICKS_PER_ELEMENT):
+            pyautogui.click(center_x, center_y)
+            # print(f"已点击位置：({center_x}, {center_y}) - 第 {i+1}/{CLICKS_PER_ELEMENT} 次")
+            # 使用随机延迟调整点击间隔
+            time.sleep(0.05)  # 减少点击间隔，加快速度
+    else:
+        print(f"点击坐标 ({center_x}, {center_y}) 超出屏幕范围，无法点击。")
+
+def main():
+    print("脚本开始运行...")
+
+    # 获取所有目标图片的路径
+    target_images = get_target_images(IMAGE_FOLDER)
+    if not target_images:
+        print("未在指定的文件夹中找到任何图片。请检查路径和图片格式。")
+        return
+
+    while True:
+        # 截取屏幕截图一次，提高效率
+        screenshot = pyautogui.screenshot()
+        screenshot_gray = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2GRAY)
+
+        # 在一次截图中同时查找所有目标图片
+        elements = find_elements(screenshot_gray, target_images)
+
+        if elements is not None and len(elements) > 0:
+            print(f"找到 {len(elements)} 个元素。")
+            for (x, y, w, h) in elements:
+                # print(f"处理元素，位置：({x}, {y}, {w}, {h})")
+                try:
+                    click_element(x, y, w, h)
+                except Exception as e:
+                    print(f"点击元素时发生错误：{e}")
+        else:
+            # print("未找到任何元素，继续监测...")
+            pass  # 不输出，减少控制台信息
+
+        # 减少循环间隔，加快扫描速度
+        time.sleep(0.1)
+
+if __name__ == "__main__":
+    main()
