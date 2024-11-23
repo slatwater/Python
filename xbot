@@ -1,0 +1,174 @@
+import requests
+from telegram.ext import Updater, CommandHandler
+import threading
+import time
+import os
+import logging
+
+# 设置日志配置
+logging.basicConfig(level=logging.DEBUG)
+
+# 读取 Twitter Bearer Tokens
+def load_bearer_tokens():
+    tokens = []
+    token_file = r'C:\xbot\twitter_bearer_tokens.txt'  # 使用原始字符串，确保路径正确
+    logging.debug(f"尝试读取令牌文件：{token_file}")
+    with open(token_file, 'r') as f:
+        for line in f:
+            token = line.strip()
+            if token:
+                tokens.append(token)
+    logging.info(f"已加载 {len(tokens)} 个 Bearer Token")
+    return tokens
+
+bearer_tokens = load_bearer_tokens()
+current_token_index = 0
+
+def get_headers():
+    global current_token_index
+    token = bearer_tokens[current_token_index]
+    headers = {
+        'Authorization': f'Bearer {token}'
+    }
+    return headers
+
+# 切换到下一个 Bearer Token
+def switch_bearer_token():
+    global current_token_index
+    current_token_index = (current_token_index + 1) % len(bearer_tokens)
+    logging.info(f"切换到下一个 Bearer Token：{current_token_index + 1}")
+
+# 初始化 Telegram 机器人
+TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'  # 替换为您的 Telegram 机器人令牌
+updater = Updater(TELEGRAM_TOKEN, use_context=True)
+dispatcher = updater.dispatcher
+
+# 追踪的 Twitter 用户列表
+tracked_users = []
+
+# /start 命令处理程序
+def start(update, context):
+    update.message.reply_text(
+        "您好！欢迎使用 Twitter 推文追踪机器人。您可以使用以下命令：\n"
+        "/add 用户名 - 添加要追踪的用户\n"
+        "/remove 用户名 - 移除追踪的用户\n"
+        "/list - 查看当前追踪的用户列表"
+    )
+
+# 添加用户命令
+def add_user(update, context):
+    logging.info(f"收到添加用户请求：{context.args}")
+    if context.args:
+        username = context.args[0]
+        if username not in tracked_users:
+            tracked_users.append(username)
+            update.message.reply_text(f"已添加用户：{username}")
+        else:
+            update.message.reply_text(f"用户已在列表中：{username}")
+    else:
+        update.message.reply_text("请提供要添加的 Twitter 用户名。")
+
+# 删除用户命令
+def remove_user(update, context):
+    logging.info(f"收到删除用户请求：{context.args}")
+    if context.args:
+        username = context.args[0]
+        if username in tracked_users:
+            tracked_users.remove(username)
+            update.message.reply_text(f"已删除用户：{username}")
+        else:
+            update.message.reply_text(f"用户不在列表中：{username}")
+    else:
+        update.message.reply_text("请提供要删除的 Twitter 用户名。")
+
+# 查看用户列表命令
+def list_users(update, context):
+    logging.info("收到查看用户列表请求")
+    if tracked_users:
+        user_list = '\n'.join(tracked_users)
+        update.message.reply_text(f"当前追踪的用户：\n{user_list}")
+    else:
+        update.message.reply_text("当前没有追踪的用户。")
+
+dispatcher.add_handler(CommandHandler('start', start))
+dispatcher.add_handler(CommandHandler('add', add_user))
+dispatcher.add_handler(CommandHandler('remove', remove_user))
+dispatcher.add_handler(CommandHandler('list', list_users))
+
+# 获取用户 ID
+def get_user_id(username, headers):
+    url = f"https://api.twitter.com/2/users/by/username/{username}"
+    params = {
+        'user.fields': 'id'
+    }
+    response = requests.get(url, headers=headers, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        return data['data']['id']
+    elif response.status_code == 429:
+        logging.warning("达到 API 速率限制，切换 Bearer Token")
+        switch_bearer_token()
+        return get_user_id(username, get_headers())
+    else:
+        logging.error(f"获取用户 ID 时出错：{response.status_code} - {response.text}")
+        return None
+
+# 获取最新推文的函数
+def fetch_latest_tweets():
+    try:
+        last_seen_ids = {}
+        chat_id = YOUR_TELEGRAM_CHAT_ID  # 替换为您的 Telegram 聊天 ID，确保是整数
+
+        while True:
+            time.sleep(60)  # 等待 60 秒
+            for username in tracked_users:
+                headers = get_headers()
+                user_id = get_user_id(username, headers)
+                if not user_id:
+                    continue
+
+                params = {
+                    'expansions': 'author_id',
+                    'tweet.fields': 'created_at',
+                    'max_results': '5'
+                }
+                if username in last_seen_ids:
+                    params['since_id'] = last_seen_ids[username]
+
+                url = f"https://api.twitter.com/2/users/{user_id}/tweets"
+
+                try:
+                    response = requests.get(url, headers=headers, params=params)
+                    if response.status_code == 200:
+                        data = response.json()
+                        tweets = data.get('data', [])
+                        if tweets:
+                            last_seen_ids[username] = tweets[0]['id']
+                            for tweet in reversed(tweets):
+                                message = f"@{username} 发推了：\n{tweet['text']}"
+                                updater.bot.send_message(chat_id=chat_id, text=message)
+                    elif response.status_code == 429:
+                        logging.warning("达到 API 速率限制，切换 Bearer Token")
+                        switch_bearer_token()
+                    else:
+                        logging.error(f"获取用户 {username} 的推文时出错：{response.status_code} - {response.text}")
+                except Exception as e:
+                    logging.error(f"请求失败：{e}")
+    except Exception as e:
+        logging.error(f"发生异常：{e}")
+        import traceback
+        traceback.print_exc()
+
+# 启动获取推文的线程
+def start_fetching():
+    logging.info("启动获取推文的线程")
+    thread = threading.Thread(target=fetch_latest_tweets)
+    thread.daemon = True  # 设置为守护线程
+    thread.start()
+
+if __name__ == '__main__':
+    logging.info("启动程序")
+    start_fetching()
+    logging.info("启动 Telegram 机器人")
+    updater.start_polling()
+    updater.idle()
