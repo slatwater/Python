@@ -1,0 +1,156 @@
+#!/usr/bin/env node
+/**
+ * This is a template MCP server that implements a simple code creation system.
+ * It demonstrates core MCP concepts like resources, tools, and file handling by allowing:
+ * - Listing available tools and resources
+ * - Creating code files in specific locations
+ */
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { 
+    CallToolRequestSchema, 
+    ListResourcesRequestSchema, 
+    ListToolsRequestSchema, 
+    ReadResourceRequestSchema, 
+    ListPromptsRequestSchema, 
+    GetPromptRequestSchema 
+} from "@modelcontextprotocol/sdk/types.js";
+import fs from 'fs';
+import path from 'path';
+
+/**
+ * Create an MCP server with capabilities for resources, tools, and prompts.
+ */
+const server = new Server({
+    name: "vscode",
+    version: "0.1.0",
+}, {
+    capabilities: {
+        resources: {},
+        tools: {},
+        prompts: {},
+    },
+});
+
+/**
+ * Handler for listing available tools.
+ * Exposes a tool to create new code files.
+ */
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+        tools: [
+            {
+                name: "create_code_file",
+                description: "Create and save a code file in a specified location",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        filePath: {
+                            type: "string",
+                            description: "Full path where the file should be saved"
+                        },
+                        fileName: {
+                            type: "string",
+                            description: "Name of the file"
+                        },
+                        content: {
+                            type: "string",
+                            description: "Content to write into the file"
+                        }
+                    },
+                    required: ["filePath", "fileName", "content"]
+                }
+            }
+        ]
+    };
+});
+
+/**
+ * Handler for creating and saving a code file.
+ */
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    switch (request.params.name) {
+        case "create_code_file": {
+            const { filePath, fileName, content } = request.params.arguments;
+            const fullPath = path.join(filePath, fileName);
+
+            // Create the directory if it doesn't exist
+            try {
+                fs.mkdirSync(filePath, { recursive: true });
+
+                // Write content to the file
+                fs.writeFileSync(fullPath, content);
+                return {
+                    content: [{
+                        type: "text",
+                        text: `File created successfully at ${fullPath}`
+                    }]
+                };
+            } catch (error) {
+                throw new Error(`Error saving the file: ${error.message}`);
+            }
+        }
+        default:
+            throw new Error("Unknown tool");
+    }
+});
+
+/**
+ * Handler for listing resources. For now, this will just list the available tools.
+ */
+server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    return {
+        resources: []
+    };
+});
+
+/**
+ * Handler for prompts (optional). You could implement prompts like summarizing code files.
+ */
+server.setRequestHandler(ListPromptsRequestSchema, async () => {
+    return {
+        prompts: [
+            {
+                name: "summarize_code",
+                description: "Summarize the code in all files"
+            }
+        ]
+    };
+});
+
+/**
+ * Handler for the "summarize_code" prompt. You can implement this to summarize code files.
+ */
+server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    if (request.params.name !== "summarize_code") {
+        throw new Error("Unknown prompt");
+    }
+
+    return {
+        messages: [
+            {
+                role: "user",
+                content: {
+                    type: "text",
+                    text: "Please summarize the code in the following files:"
+                }
+            }
+        ]
+    };
+});
+
+/**
+ * Start the server using stdio transport.
+ * This allows the server to communicate via standard input/output streams.
+ */
+async function main() {
+    console.log("Starting the server...");
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.log("Server is running...");
+}
+
+main().catch((error) => {
+    console.error("Server error:", error);
+    process.exit(1);
+});
