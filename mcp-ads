@@ -1,0 +1,230 @@
+Version:0.9 StartHTML:0000000105 EndHTML:0000065065 StartFragment:0000000141 EndFragment:0000065029
+#!/usr/bin/env node
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import axios from "axios";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { exec } from "child_process";
+import util from "util";
+
+const execAsync = util.promisify(exec);
+
+// 配置
+const ADSPOWER_PATH = `"C:\\Program Files\\AdsPower Global\\AdsPower Global.exe"`; // 替换为 AdsPower 的实际路径
+const API_PORT = 50325;
+const API_HOST = `http://localhost:${API_PORT}`;
+const API_KEY = "YOUR_API_KEY"; // 替换为你的 API Key
+const REQUEST_DELAY = 500; // 每次请求的间隔时间（毫秒）
+const BATCH_SIZE = 5; // 每批次处理的 user_id 数量
+
+// 检查 AdsPower 服务是否已启动
+async function isAdsPowerRunning() {
+  try {
+    const response = await axios.get(`${API_HOST}/status`);
+    return response.data.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+// 启动 AdsPower 客户端（有界面模式）
+async function startAdsPower() {
+  console.log("检查 AdsPower 客户端状态...");
+  const running = await isAdsPowerRunning();
+
+  if (running) {
+    console.log("AdsPower 客户端已运行。");
+    return;
+  }
+
+  console.log("启动 AdsPower 客户端...");
+  try {
+    const { stdout, stderr } = await execAsync(`${ADSPOWER_PATH}`);
+    console.log("启动输出:", stdout);
+    if (stderr) console.error("启动警告:", stderr);
+    console.log("AdsPower 客户端启动成功。");
+  } catch (error) {
+    console.error("启动 AdsPower 客户端失败:", error.message);
+    process.exit(1);
+  }
+}
+
+// 获取指定页码的环境列表
+async function getEnvironmentsByPage(page = 1, page_size = 50) {
+  try {
+    const response = await axios.get(`${API_HOST}/api/v1/user/list`, {
+      params: {
+        api_key: API_KEY,
+        page,
+        page_size,
+      },
+    });
+    if (response.data.code === 0) {
+      return response.data.data.list;
+    } else {
+      console.error(`获取环境列表失败: ${response.data.msg}`);
+      return [];
+    }
+  } catch (error) {
+    console.error(`请求环境列表时出错: ${error.message}`);
+    return [];
+  }
+}
+
+// 启动或关闭指定 user_id 的浏览器
+async function manageBrowser(user_id, action = "start") {
+  const endpoint = action === "start" ? "start" : "stop";
+  try {
+    const response = await axios.get(`${API_HOST}/api/v1/browser/${endpoint}`, {
+      params: {
+        api_key: API_KEY,
+        user_id,
+      },
+    });
+    if (response.data.code === 0) {
+      console.log(`成功对 user_id 为 ${user_id} 的浏览器执行 ${action} 操作`);
+      return { status: "success", message: "操作成功", data: response.data.data };
+    } else {
+      console.error(`对 user_id 为 ${user_id} 的浏览器执行 ${action} 操作失败: ${response.data.msg}`);
+      return { status: "error", message: response.data.msg };
+    }
+  } catch (error) {
+    console.error(`请求 ${action} 浏览器时出错: ${error.message}`);
+    return { status: "error", message: error.message };
+  }
+}
+
+// 批量操作浏览器
+async function batchManageBrowsers(user_ids, action = "start") {
+  const results = [];
+  for (const batch of chunkArray(user_ids, BATCH_SIZE)) {
+    for (const user_id of batch) {
+      const result = await manageBrowser(user_id, action);
+      results.push({ user_id, result });
+      await sleep(REQUEST_DELAY); // 请求间隔
+    }
+  }
+  return results;
+}
+
+// 工具：启动浏览器和按页管理浏览器
+const server = new Server(
+  {
+    name: "ads-browser-server",
+    version: "1.0.0",
+  },
+  {
+    capabilities: {
+      tools: {},
+    },
+  }
+);
+
+// 列出工具
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return {
+    tools: [
+      {
+        name: "start_browser",
+        description: "启动指定环境的 ADS 浏览器",
+        inputSchema: {
+          type: "object",
+          properties: {
+            user_id: { type: "string", description: "环境 ID" },
+          },
+          required: ["user_id"],
+        },
+      },
+      {
+        name: "manage_browsers_by_page",
+        description: "按页管理浏览器（启动或关闭）",
+        inputSchema: {
+          type: "object",
+          properties: {
+            page: { type: "integer", description: "页码" },
+            page_size: { type: "integer", description: "每页大小" },
+            action: { type: "string", description: "动作 (start 或 stop)" },
+          },
+          required: ["page", "action"],
+        },
+      },
+    ],
+  };
+});
+
+// 工具：按页批量启动或关闭浏览器
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name } = request.params;
+
+  try {
+    if (name === "start_browser") {
+      const { user_id } = request.params.arguments;
+
+      if (!user_id || user_id === "default") {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", message: "无效的 user_id，请提供正确的环境 ID" }) }] };
+      }
+
+      const result = await manageBrowser(user_id, "start");
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    }
+
+    if (name === "manage_browsers_by_page") {
+      const { page, page_size = 50, action } = request.params.arguments;
+
+      if (!page || typeof page !== "number" || page < 1) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", message: "无效的页码，请提供正确的 page 参数" }) }] };
+      }
+
+      if (!["start", "stop"].includes(action)) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", message: "无效的动作，请提供 start 或 stop" }) }] };
+      }
+
+      console.log(`正在批量执行第 ${page} 页的浏览器操作: ${action}`);
+
+      const environments = await getEnvironmentsByPage(page, page_size);
+      if (environments.length === 0) {
+        return { content: [{ type: "text", text: `第 ${page} 页没有环境信息` }] };
+      }
+
+      const user_ids = environments.map((env) => env.user_id);
+      const results = await batchManageBrowsers(user_ids, action);
+
+      return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+    }
+
+    return { content: [{ type: "text", text: "未知工具名称" }] };
+  } catch (error) {
+    console.error(`${name} 失败:`, error.message);
+    return {
+      content: [{ type: "text", text: `操作失败: ${error.message}` }],
+    };
+  }
+});
+
+// 工具函数：将数组分块
+function chunkArray(array, size) {
+  const result = [];
+  for (let i = 0; i < array.length; i += size) {
+    result.push(array.slice(i, i + size));
+  }
+  return result;
+}
+
+// 工具函数：延迟
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 主函数：启动 MCP 服务器
+async function main() {
+  console.log("启动 MCP 服务器...");
+  await startAdsPower();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.log("MCP 服务器已启动并连接。");
+}
+
+main().catch((error) => {
+  console.error("MCP 服务器启动错误:", error.message);
+  process.exit(1);
+});
