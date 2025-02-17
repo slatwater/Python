@@ -1,0 +1,59 @@
+import requests
+import time
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+# 配置和设置
+local_api_url = "http://local.adspower.net:50325"  # 本地API地址
+
+# 获取已启动的浏览器信息
+get_active_browser_url = f"{local_api_url}/api/v1/browser/local-active"
+response = requests.get(get_active_browser_url).json()
+
+if response["code"] != 0 or not response["data"]["list"]:
+    print("没有找到已启动的浏览器。")
+    exit()
+
+# 遍历所有已启动的浏览器进行自动化交互
+for browser_info in response["data"]["list"]:
+    selenium_ws_url = browser_info["ws"]["selenium"]
+    chrome_driver_path = browser_info["webdriver"]
+
+    # 设置 Chrome 调试选项
+    chrome_options = Options()
+    chrome_options.add_experimental_option("debuggerAddress", selenium_ws_url)
+
+    # 初始化 WebDriver
+    service = Service(executable_path=chrome_driver_path)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    try:
+        # 获取所有窗口句柄
+        windows = driver.window_handles
+        print("所有打开的窗口句柄：", windows)
+
+        # 遍历所有窗口句柄，并通过标题或 URL 判断弹窗窗口
+        for window in windows:
+            driver.switch_to.window(window)
+            print(f"当前窗口标题: {driver.title}")
+
+            # 你可以在这里判断窗口是否是弹窗窗口，比如根据标题或 URL
+            if "Keplr" in driver.title:  # 根据窗口标题判断（假设弹窗标题包含 "Keplr"）
+                # 确保按钮元素可点击
+                try:
+                    button = WebDriverWait(driver, 20).until(
+                        EC.element_to_be_clickable((By.XPATH, "//*[@id='app']/div/div/div/div[1]/div[2]/div/div/div/div/div[3]/div[3]/button"))
+                    )
+                    button.click()  # 点击按钮
+                    print(f"在浏览器 {browser_info['user_id']} 中点击了按钮。")
+                except Exception as e:
+                    print(f"浏览器 {browser_info['user_id']} 中未找到按钮或无法点击:", e)
+
+                break  # 成功找到弹窗后，跳出循环
+
+    finally:
+        driver.quit()  # 退出浏览器
